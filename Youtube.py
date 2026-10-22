@@ -8,9 +8,9 @@ from pyrogram.types import Message
 from py_yt import VideosSearch, Playlist
 import aiohttp
 
-API_URL = os.environ.get("SHRUTI_API_URL", "https://ananyaxmusic-h-2fcc6ccbfb4f.herokuapp.com")
+API_URL = os.environ.get("AKASH_API_URL", "https://ananyaxmusic-h-2fcc6ccbfb4f.herokuapp.com")
 
-API_KEY = os.environ.get("SHRUTI_API_KEY", "TeamAnanyaBotsGICaU03vkma6Ij4EBd5K")
+API_KEY = os.environ.get("AKASH_API_KEY", "TeamAnanyaBotsGICaU03vkma6Ij4EBd5K")
 
 DOWNLOAD_DIR = "downloads"
 
