@@ -90,7 +90,7 @@ def render_card(
 ) -> Image.Image:
     cover = cover.convert("RGB")
 
-    bg = _cover(cover, BASE_W, BASE_H).filter(ImageFilter.GaussianBlur(30))
+    bg = _cover(cover, BASE_W, BASE_H).filter(ImageFilter.GaussianBlur(10))
     bg = ImageEnhance.Brightness(bg).enhance(0.42)
     bg = ImageEnhance.Color(bg).enhance(1.15)
 
