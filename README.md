@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/ShiviMusic.svg" width="100%" height="500">
+  <img src="ShiviMusic.svg" width="100%" height="500">
 </p>
 
 <div align="center">
