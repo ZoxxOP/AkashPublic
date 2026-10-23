@@ -1,6 +1,7 @@
 import asyncio
 import math
 import os
+import re
 import time
 
 import aiofiles
@@ -357,6 +358,63 @@ async def _fetch_meta(videoid: str) -> dict:
     return meta
 
 
+_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_URL_ID_RE = re.compile(r"(?:v=|youtu\.be/|shorts/|embed/)([A-Za-z0-9_-]{11})")
+
+
+def _ytdlp_search_sync(query: str) -> dict:
+    import yt_dlp  # optional: pip install yt-dlp
+
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(f"ytsearch1:{query}", download=False)
+    entry = (info.get("entries") or [None])[0] or {}
+    return {
+        "id": entry.get("id"),
+        "title": (entry.get("title") or "").strip(),
+        "channel": entry.get("channel") or entry.get("uploader") or "",
+        "duration": int(entry.get("duration") or 0),
+        "thumb": entry.get("thumbnail"),
+    }
+
+
+async def _search_query(query: str) -> dict:
+    """Song ke naam se YouTube par search karke pehla result deta hai."""
+    try:
+        res = await VideosSearch(query, limit=1).next()
+        data = (res.get("result") or [None])[0]
+        if data:
+            channel = data.get("channel") or {}
+            thumbs = data.get("thumbnails") or []
+            return {
+                "id": data.get("id") or data.get("videoId"),
+                "title": (data.get("title") or "").strip(),
+                "channel": channel.get("name", "") if isinstance(channel, dict) else "",
+                "duration": _parse_duration(data.get("duration")),
+                "thumb": thumbs[0].get("url", "").split("?")[0] if thumbs else None,
+            }
+    except Exception as e:
+        print(f"[thumb] py_yt search failed: {e!r}")
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _ytdlp_search_sync, query)
+    except Exception as e:
+        print(f"[thumb] yt-dlp search failed: {e!r}")
+    return {}
+
+
+async def _resolve(query_or_id: str):
+    """Naam / URL / video id kuch bhi do -> (videoid, meta ya None)."""
+    q = (query_or_id or "").strip()
+    if _ID_RE.match(q):
+        return q, None
+    m = _URL_ID_RE.search(q)
+    if m:
+        return m.group(1), None
+    found = await _search_query(q)
+    return found.get("id"), (found if found.get("id") else None)
+
+
 async def get_thumb(
     videoid: str,
     progress_percent: int = 0,
@@ -368,12 +426,17 @@ async def get_thumb(
     channel: str = None,
 ) -> str:
     """
+    videoid me song ka NAAM (query), YouTube URL ya video id, kuch bhi de sakte ho.
     duration_sec / played_sec / title / channel optional hain.
     Bot ke paas song ka data pehle se ho to wahi pass karo (sabse reliable),
     warna YouTube se nikala jayega.
     played_sec do to wahi "kitna chal gaya" dikhega, nahi to progress_percent se nikalega.
     """
     progress_percent = max(0, min(100, int(progress_percent or 0)))
+    videoid, found = await _resolve(videoid)
+    if not videoid:
+        print("[thumb] song nahi mila")
+        return YOUTUBE_IMG_URL
     tag = f"{progress_percent}" if played_sec is None else f"s{int(played_sec)}"
     cache_path = os.path.join(CACHE_DIR, f"{videoid}_glass_{tag}.png")
 
@@ -384,8 +447,15 @@ async def get_thumb(
 
     try:
         meta = {"title": "", "channel": "", "duration": 0, "thumb": None}
-        if not (title and channel and duration_sec):
-            meta = await _fetch_meta(videoid)
+        if found:
+            meta.update({k: v for k, v in found.items() if k != "id" and v})
+        if not (title and channel and duration_sec) and not (
+            meta["title"] and meta["channel"] and meta["duration"]
+        ):
+            fetched = await _fetch_meta(videoid)
+            for k, v in fetched.items():
+                if v and not meta.get(k):
+                    meta[k] = v
         meta["title"] = title or meta["title"] or "Unknown Title"
         meta["channel"] = channel or meta["channel"] or "Unknown Channel"
         meta["duration"] = int(duration_sec or meta["duration"] or 0)
@@ -463,5 +533,5 @@ async def gen_thumb(
         played_sec=played_sec,
         title=title,
         channel=channel,
-    )
-    
+        )
+        
