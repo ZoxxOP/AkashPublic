@@ -1,3 +1,4 @@
+import asyncio
 import math
 import os
 import time
@@ -198,7 +199,7 @@ def render_card(
             fill=(242, 242, 242, 255),
         )
     d.text((s(428), s(510)), _fmt(elapsed_sec), font=f_time, fill=(240, 240, 240, 255), anchor="lm")
-    right = "LIVE" if total_sec <= 0 else "\u2212" + _fmt(total_sec - elapsed_sec)
+    right = "--:--" if total_sec <= 0 else "\u2212" + _fmt(total_sec - elapsed_sec)
     d.text((s(1122), s(510)), right, font=f_time, fill=(240, 240, 240, 255), anchor="rm")
 
     icon = (232, 232, 232, 255)
@@ -276,30 +277,83 @@ def render_card(
     return out.resize((OUT_W, OUT_H), Image.Resampling.LANCZOS)
 
 
-async def _fetch_meta(videoid: str) -> dict:
-    meta = {"title": "Unknown Title", "channel": "Unknown Channel", "duration": 0, "thumb": None}
-    for _attempt in range(2):
+async def _meta_pyyt(videoid: str) -> dict:
+    out = {}
+    for query in (videoid, f"https://www.youtube.com/watch?v={videoid}"):
         try:
-            results = VideosSearch(f"https://www.youtube.com/watch?v={videoid}", limit=1)
-            results_data = await results.next()
-            data = results_data.get("result", [{}])[0]
+            res = await VideosSearch(query, limit=5).next()
+            for data in res.get("result", []):
+                if (data.get("id") or data.get("videoId")) != videoid:
+                    continue
+                out["title"] = (data.get("title") or "").strip()
+                channel = data.get("channel") or {}
+                if isinstance(channel, dict):
+                    out["channel"] = channel.get("name") or ""
+                out["duration"] = _parse_duration(data.get("duration"))
+                thumbs = data.get("thumbnails") or []
+                if thumbs:
+                    out["thumb"] = thumbs[0].get("url", "").split("?")[0]
+                return out
+        except Exception as e:
+            print(f"[thumb] py_yt failed ({query[:30]}): {e!r}")
+    return out
 
-            fetched_id = data.get("id") or data.get("videoId")
-            if fetched_id and fetched_id != videoid:
-                continue
 
-            meta["title"] = (data.get("title") or meta["title"]).strip()
-            channel = data.get("channel") or {}
-            if isinstance(channel, dict):
-                meta["channel"] = channel.get("name") or meta["channel"]
-            meta["duration"] = _parse_duration(data.get("duration"))
+def _ytdlp_sync(videoid: str) -> dict:
+    import yt_dlp  # optional: pip install yt-dlp
 
-            thumbnails = data.get("thumbnails", [])
-            if thumbnails:
-                meta["thumb"] = thumbnails[0].get("url", "").split("?")[0] or None
-            return meta
-        except Exception:
-            pass
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(f"https://www.youtube.com/watch?v={videoid}", download=False)
+    return {
+        "title": (info.get("title") or "").strip(),
+        "channel": info.get("channel") or info.get("uploader") or "",
+        "duration": int(info.get("duration") or 0),
+    }
+
+
+async def _meta_ytdlp(videoid: str) -> dict:
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _ytdlp_sync, videoid)
+    except Exception as e:
+        print(f"[thumb] yt-dlp failed: {e!r}")
+        return {}
+
+
+async def _meta_oembed(videoid: str) -> dict:
+    url = (
+        "https://www.youtube.com/oembed?format=json&url="
+        f"https://www.youtube.com/watch?v={videoid}"
+    )
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json(content_type=None)
+                    return {
+                        "title": (data.get("title") or "").strip(),
+                        "channel": data.get("author_name") or "",
+                    }
+    except Exception as e:
+        print(f"[thumb] oembed failed: {e!r}")
+    return {}
+
+
+async def _fetch_meta(videoid: str) -> dict:
+    meta = {"title": "", "channel": "", "duration": 0, "thumb": None}
+
+    def merge(new: dict):
+        for k, v in (new or {}).items():
+            if v and not meta.get(k):
+                meta[k] = v
+
+    merge(await _meta_pyyt(videoid))
+    if not (meta["title"] and meta["channel"] and meta["duration"]):
+        merge(await _meta_ytdlp(videoid))  # song ki duration bhi yahin se aati hai
+    if not (meta["title"] and meta["channel"]):
+        merge(await _meta_oembed(videoid))
     return meta
 
 
@@ -308,9 +362,20 @@ async def get_thumb(
     progress_percent: int = 0,
     use_cache: bool = True,
     user_name: str = "Akash",
+    duration_sec: int = 0,
+    played_sec: int = None,
+    title: str = None,
+    channel: str = None,
 ) -> str:
+    """
+    duration_sec / played_sec / title / channel optional hain.
+    Bot ke paas song ka data pehle se ho to wahi pass karo (sabse reliable),
+    warna YouTube se nikala jayega.
+    played_sec do to wahi "kitna chal gaya" dikhega, nahi to progress_percent se nikalega.
+    """
     progress_percent = max(0, min(100, int(progress_percent or 0)))
-    cache_path = os.path.join(CACHE_DIR, f"{videoid}_glass_{progress_percent}.png")
+    tag = f"{progress_percent}" if played_sec is None else f"s{int(played_sec)}"
+    cache_path = os.path.join(CACHE_DIR, f"{videoid}_glass_{tag}.png")
 
     if use_cache and os.path.exists(cache_path):
         return cache_path
@@ -318,7 +383,13 @@ async def get_thumb(
     thumb_path = os.path.join(CACHE_DIR, f"thumb_{videoid}_{int(time.time())}.jpg")
 
     try:
-        meta = await _fetch_meta(videoid)
+        meta = {"title": "", "channel": "", "duration": 0, "thumb": None}
+        if not (title and channel and duration_sec):
+            meta = await _fetch_meta(videoid)
+        meta["title"] = title or meta["title"] or "Unknown Title"
+        meta["channel"] = channel or meta["channel"] or "Unknown Channel"
+        meta["duration"] = int(duration_sec or meta["duration"] or 0)
+
         urls = [u for u in (meta["thumb"], DIRECT_THUMB_FALLBACK.format(videoid=videoid)) if u]
 
         downloaded = False
@@ -341,11 +412,22 @@ async def get_thumb(
 
         cover = Image.open(thumb_path).convert("RGB")
         total = meta["duration"]
-        elapsed = int(total * progress_percent / 100) if total else 0
+        if played_sec is not None:
+            elapsed = int(played_sec)
+        else:
+            elapsed = int(total * progress_percent / 100) if total else 0
+        if total:
+            elapsed = min(elapsed, total)
 
         card = render_card(cover, meta["title"], meta["channel"], total, elapsed)
-        card.save(cache_path, "PNG", optimize=True)
-        return cache_path
+
+        complete = meta["title"] != "Unknown Title" and total > 0
+        if complete:  # adhoore data wali image cache nahi hogi, next baar dobara try hoga
+            card.save(cache_path, "PNG", optimize=True)
+            return cache_path
+        out = os.path.join(CACHE_DIR, f"{videoid}_glass_tmp.png")
+        card.save(out, "PNG", optimize=True)
+        return out
 
     except Exception as e:
         import traceback
@@ -367,11 +449,19 @@ async def gen_thumb(
     progress_percent: int = 0,
     use_cache: bool = True,
     user_name: str = "Akash",
+    duration_sec: int = 0,
+    played_sec: int = None,
+    title: str = None,
+    channel: str = None,
 ) -> str:
     return await get_thumb(
         videoid=videoid,
         progress_percent=progress_percent,
         use_cache=use_cache,
         user_name=user_name,
+        duration_sec=duration_sec,
+        played_sec=played_sec,
+        title=title,
+        channel=channel,
     )
     
