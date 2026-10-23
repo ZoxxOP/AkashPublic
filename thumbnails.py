@@ -17,14 +17,33 @@ BASE_W, BASE_H = 1536, 864
 SS = 2
 
 BRAND = "TeamAnanyaBots"
-FONT_PATH = "font.ttf"
+FONT_PATH = "font.ttf"          # apna regular font (optional)
+FONT_BOLD_PATH = "font_bold.ttf"  # apna bold font (optional)
+
+_REG_FALLBACKS = [
+    FONT_PATH,
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+]
+_BOLD_FALLBACKS = [
+    FONT_BOLD_PATH,
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+    "C:/Windows/Fonts/arialbd.ttf",
+]
 
 DIRECT_THUMB_FALLBACK = "https://i.ytimg.com/vi/{videoid}/hqdefault.jpg"
 
 
-def _font(size: int) -> ImageFont.FreeTypeFont:
+def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+    for path in (_BOLD_FALLBACKS if bold else _REG_FALLBACKS):
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
     try:
-        return ImageFont.truetype(FONT_PATH, size)
+        return ImageFont.load_default(size)  # Pillow >= 10.1
     except Exception:
         return ImageFont.load_default()
 
@@ -138,8 +157,8 @@ def render_card(
         box(*card_box), s(radius), outline=(255, 255, 255, 80), width=s(1.5)
     )
 
-    f_brand = _font(s(16))
-    f_title = _font(s(29))
+    f_brand = _font(s(16), bold=True)
+    f_title = _font(s(31), bold=True)
     f_chan = _font(s(23))
     f_time = _font(s(17))
 
